@@ -180,6 +180,9 @@ struct htree_data *ht_find(struct htree_state *hts,
 	struct htree_data *rdata = NULL;
 	struct hash_tree *rtree;
 
+	if (!htree)
+		return NULL;
+
 	if (_ht_find(hts, htree, index, &rdata, &rtree) == htf_find)
 		return rdata;
 	return NULL;
@@ -345,6 +348,9 @@ struct htree_data *ht_insert(struct htree_state *hts, struct hash_tree *htree,
 	struct hash_tree *rtree = NULL;
 	enum ht_flags htf;
 
+	if (!htree)
+		return NULL;
+
 	htf = _ht_find(hts, htree, hdata->index, &rdata, &rtree);
 
 	_ht_insert(hts, rtree, rdata, hdata, htf, req);
@@ -478,6 +484,9 @@ struct htree_data *ht_erase(struct htree_state *hts,
 {
 	struct htree_data *rdata = NULL;
 
+	if (!htree)
+		return NULL;
+
 	if (_ht_erase(hts, htree, &rdata, index) == htf_erase)
 		return rdata;
 
@@ -533,22 +542,31 @@ static void __ht_free_all(struct htree_state *hts,
 }
 
 /**
- * ht_destroy - public function to free hash tree
+ * ht_destroy_lock - public function to free hash tree
  * @hts: htree_state pointer
- * @htree: hash_tree pointer(root)
+ * @root: htree_tree pointer(root)
  *
  * this function removes all hash tree, but it does not remove udata.
  */
-enum ht_flags ht_destroy(struct htree_state *hts, struct hash_tree *htree)
+enum ht_flags ht_destroy_lock(struct htree_state *hts, struct htree_root *root)
 {
 	s32 acnt = 0;
 	u64 dcnt = 0;
+	struct hash_tree *htree;
 
 	if (hts->acnt == 0 && hts->dcnt == 0)
 		return htf_ok;
 
+	htree = htree_first_rcu(root);
+	if (!htree)
+		return htf_none;
+
 	hts->dept = 0;
+
+	ht_lock(root);
 	__ht_free_all(hts, htree, &acnt, &dcnt);
+	RCU_INIT_POINTER(root->ht_first, NULL);
+	ht_unlock(root);
 
 	hts->acnt -= acnt;
 	hts->dcnt -= dcnt;
@@ -556,7 +574,7 @@ enum ht_flags ht_destroy(struct htree_state *hts, struct hash_tree *htree)
 	return (hts->dept == 0 && hts->dcnt == 0 && hts->acnt == 0) ?
 		htf_ok : htf_none;
 }
-EXPORT_SYMBOL(ht_destroy);
+EXPORT_SYMBOL(ht_destroy_lock);
 
 /**
  * __ht_statis - private function to call recursively to calculate nodes
@@ -612,6 +630,9 @@ void ht_statis(struct htree_state *hts,
 	hts->asum = 0;
 	hts->dept = 0;
 	hts->dmax = 0;
+
+	if (!htree)
+		return;
 
 	__ht_statis(hts, htree, acnt, dcnt);
 }

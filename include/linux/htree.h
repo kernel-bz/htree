@@ -15,6 +15,8 @@
 #include <linux/hash.h>
 #include <linux/hashtable.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
+#include <linux/rcupdate.h>
 
 /*
  size of one hash tree struct: [16]Bytes
@@ -111,6 +113,17 @@ enum ht_flags {			/* htf: htree working flags (keep order) */
 	htf_erase,
 	htf_freed,
 };
+
+struct htree_root {				/* root: hash tree root */
+	spinlock_t		ht_lock;	/* lock while update */
+	struct hash_tree __rcu 	*ht_first;	/* start of the hash tree */
+};
+
+#define DEFINE_HTREE_ROOT(name)					\
+	struct htree_root name = { 				\
+		.ht_lock = __SPIN_LOCK_UNLOCKED(name.ht_lock),	\
+		.ht_first = NULL,				\
+	}
 
 #define HTREE_BITS_START	8	/* start of hash bits(default) */
 #define HTREE_BITS_END		3	/* end of hash bits */
@@ -235,7 +248,7 @@ struct htree_data *ht_insert(struct htree_state *hts, struct hash_tree *htree,
 struct htree_data *ht_erase(struct htree_state *hts,
 			    struct hash_tree *htree, u64 index);
 
-enum ht_flags ht_destroy(struct htree_state *hts, struct hash_tree *htree);
+enum ht_flags ht_destroy_lock(struct htree_state *hts, struct htree_root *root);
 
 void ht_statis(struct htree_state *hts, struct hash_tree *htree,
 	       s32 *acnt, u64 *dcnt);
@@ -243,5 +256,107 @@ void ht_statis(struct htree_state *hts, struct hash_tree *htree,
 struct htree_data *ht_most_index(struct htree_state *hts, 
 				 struct hash_tree *htree);
 
+/* spin_lock API */
+#define ht_trylock(xa)          spin_trylock(&(xa)->ht_lock)
+#define ht_lock(xa)             spin_lock(&(xa)->ht_lock)
+#define ht_unlock(xa)           spin_unlock(&(xa)->ht_lock)
+#define ht_lock_bh(xa)          spin_lock_bh(&(xa)->ht_lock)
+#define ht_unlock_bh(xa)        spin_unlock_bh(&(xa)->ht_lock)
+#define ht_lock_irq(xa)         spin_lock_irq(&(xa)->ht_lock)
+#define ht_unlock_irq(xa)       spin_unlock_irq(&(xa)->ht_lock)
+#define ht_lock_irqsave(xa, flags) \
+                                spin_lock_irqsave(&(xa)->ht_lock, flags)
+#define ht_unlock_irqrestore(xa, flags) \
+                                spin_unlock_irqrestore(&(xa)->ht_lock, flags)
+#define ht_lock_nested(xa, subclass) \
+                                spin_lock_nested(&(xa)->ht_lock, subclass)
+#define ht_lock_bh_nested(xa, subclass) \
+                                spin_lock_bh_nested(&(xa)->ht_lock, subclass)
+#define ht_lock_irq_nested(xa, subclass) \
+                                spin_lock_irq_nested(&(xa)->ht_lock, subclass)
+#define ht_lock_irqsave_nested(xa, flags, subclass) \
+                spin_lock_irqsave_nested(&(xa)->ht_lock, flags, subclass)
+
+
+static inline void htree_root_alloc(struct htree_state *hts,
+		struct htree_root *root)
+{
+	rcu_assign_pointer(root->ht_first, ht_table_alloc(hts));
+}
+
+static inline struct hash_tree *htree_first_rcu(const struct htree_root *root)
+{
+	return rcu_dereference_check(root->ht_first,
+			lockdep_is_held(&root->ht_lock));
+}
+
+static inline struct hash_tree *htree_first_rcu_locked(const struct htree_root *root)
+{
+	return rcu_dereference_protected(root->ht_first,
+			lockdep_is_held(&root->ht_lock));
+}
+
+
+static inline __must_check struct htree_data *ht_insert_lock(
+		struct htree_state *hts, struct htree_root *root,
+		struct htree_data *hdata, enum ht_flags req)
+{
+	ht_lock(root);
+	hdata = ht_insert(hts, htree_first_rcu_locked(root), hdata, req);
+	ht_unlock(root);
+	return hdata;
+}
+
+static inline __must_check struct htree_data *ht_insert_lock_irq(
+		struct htree_state *hts, struct htree_root *root,
+		struct htree_data *hdata, enum ht_flags req)
+{
+	ht_lock_irq(root);
+	hdata = ht_insert(hts, htree_first_rcu_locked(root), hdata, req);
+	ht_unlock_irq(root);
+	return hdata;
+}
+
+static inline __must_check struct htree_data *ht_insert_lock_irqsave(
+		struct htree_state *hts, struct htree_root *root,
+		struct htree_data *hdata, enum ht_flags req)
+{
+	unsigned long flags;
+	ht_lock_irqsave(root, flags);
+	hdata = ht_insert(hts, htree_first_rcu_locked(root), hdata, req);
+	ht_unlock_irqrestore(root, flags);
+	return hdata;
+}
+
+static inline __must_check struct htree_data *ht_erase_lock(
+		struct htree_state *hts, struct htree_root *root, u64 index)
+{
+	struct htree_data *hdata;
+	ht_lock(root);
+	hdata = ht_erase(hts, htree_first_rcu_locked(root), index);
+	ht_unlock(root);
+	return hdata;
+}
+
+static inline __must_check struct htree_data *ht_erase_lock_irq(
+		struct htree_state *hts, struct htree_root *root, u64 index)
+{
+	struct htree_data *hdata;
+	ht_lock_irq(root);
+	hdata = ht_erase(hts, htree_first_rcu_locked(root), index);
+	ht_unlock_irq(root);
+	return hdata;
+}
+
+static inline __must_check struct htree_data *ht_erase_lock_irqsave(
+		struct htree_state *hts, struct htree_root *root, u64 index)
+{
+	unsigned long flags;
+	struct htree_data *hdata;
+	ht_lock_irqsave(root, flags);
+	hdata = ht_erase(hts, htree_first_rcu_locked(root), index);
+	ht_unlock_irqrestore(root, flags);
+	return hdata;
+}
 
 #endif	/* _LINUX_HTREE_H */

@@ -1,6 +1,6 @@
 ﻿// SPDX-License-Identifier: GPL-2.0-only
 /*
- *  htree/htree-api.c
+ *  htree/htree-test.c
  *  Hash-Trees test codes to verify
  *
  *  Copyright(C) 2024, JaeJoon Jung <rgbi3307@gmail.com>
@@ -17,28 +17,30 @@
 	Hash Tree API flow
 	------------------
 
-	*hts = ht_hts_alloc()		//alloc hts
-	ht_hts_clear_init(hts, ...)
+	DEFINE_HTREE_ROOT(ht_root);		//define htree_root
 
-	*htree = ht_table_alloc(hts)	//alloc first(depth:0) htree
+	*hts = ht_hts_alloc();			//alloc hts
+	ht_hts_clear_init(hts, ...);
+
+	htree_root_alloc(hts, &ht_root);	//alloc first hash tree
 
 	run_loop() {
 
-		*udata = _data_alloc(index)		//alloc udata
+		*udata = _data_alloc(index);	//alloc udata
 
-		ht_insert(hts, htree, udata->hdata, ..)
-		ht_erase(hts, htree, index)
-		hdata = ht_find(hts, htree, index)
-		hdata = ht_most_index(hts, htree)
+		ht_insert_lock(hts, &ht_root, udata->hdata, ..);
+		ht_erase_lock(hts, &ht_root, index);
+		hdata = ht_find(hts, ht_root.ht_first, index);
+		hdata = ht_most_index(hts, ht_root.ht_first);
 
-		ht_statis(hts, htree, ...)
+		ht_statis(hts, ht_root.ht_first, ...);
 	}
 
-	htree_erase_all(hts, htree)	//remove all udata
+	htree_erase_all_lock(hts, &ht_root)	//remove all udata
 
-	ht_destroy(hts, htree)		//remove all htree
+	ht_destroy_lock(hts, &ht_root)		//remove all htree
 
-	kfree(hts)			//remove hts
+	kfree(hts)				//remove hts
 */
 
 
@@ -74,6 +76,8 @@
 #endif
 
 #define HTREE_TEST_SCHED_CNT	200
+
+DEFINE_HTREE_ROOT(ht_root);
 
 struct data_struct {
 	/* user defined data members ... */
@@ -361,19 +365,19 @@ static void __htree_debug_walks_all(struct htree_state *hts,
 /**
  * htree_walks_all_debug - display to debug all indexes
  * @hts: htree_state pointer
- * @htree: hash_tree root pointer
+ * @root: hash_tree root pointer
  * @index: index to find
  *
  * this function cycles through all hash tables and outputs all indexes.
  */
 static void htree_debug_walks_all(struct htree_state *hts,
-				  struct hash_tree *htree, u64 index)
+				  struct htree_root *root, u64 index)
 {
 	pr_ht_debug("[@@@@) walking: sbit:%u, dmax:%u, acnt:%d, dcnt:%llu\n\n",
 		    hts->sbit, hts->dmax, hts->acnt, hts->dcnt);
 
 	hts->dept = 0;
-	__htree_debug_walks_all(hts, htree, index);
+	__htree_debug_walks_all(hts, htree_first_rcu(root), index);
 
 	pr_ht_debug("(@@@@] done: sbit:%u, dmax:%u, acnt:%d, dcnt:%llu\n\n",
 		    hts->sbit, hts->dmax, hts->acnt, hts->dcnt);
@@ -381,14 +385,14 @@ static void htree_debug_walks_all(struct htree_state *hts,
 #endif	/* HTREE_DEBUG_DETAIL */
 
 /**
- * __htree_erase_all - erase udata all
+ * __htree_erase_all_lock - erase udata all
  * @hts: htree_state pointer
  * @htree: hash_tree root pointer
  * @erased: erased udata count
  *
  * this function cycles through all hash tables and erase udata all
  */
-static void __htree_erase_all(struct htree_state *hts,
+static void __htree_erase_all_lock(struct htree_state *hts,
 			     struct hash_tree *htree, u64 *erased)
 {
 	u8 bits, ncnt;
@@ -421,7 +425,7 @@ static void __htree_erase_all(struct htree_state *hts,
 			hts->dept++;
 			pnum = anum;
 			/* recursive call */
-			__htree_erase_all(hts, _next, erased);
+			__htree_erase_all_lock(hts, _next, erased);
 			anum = pnum;
 			hts->dept--;
 		} else {
@@ -431,13 +435,13 @@ static void __htree_erase_all(struct htree_state *hts,
 }
 
 /**
- * htree_erase_all -  erase udata all
+ * htree_erase_all_lock -  erase udata all
  * @hts: htree_state pointer
- * @htree: hash_tree root pointer
+ * @root: hash_tree root pointer
  *
  * return: erased all udata count
  */
-static u64 htree_erase_all(struct htree_state *hts, struct hash_tree *htree)
+static u64 htree_erase_all_lock(struct htree_state *hts, struct htree_root *root)
 {
 	u64 erased = 0;
 
@@ -445,7 +449,10 @@ static u64 htree_erase_all(struct htree_state *hts, struct hash_tree *htree)
 		   hts->sbit, hts->dmax, hts->acnt, hts->dcnt);
 
 	hts->dept = 0;
-	__htree_erase_all(hts, htree, &erased);
+
+	ht_lock(root);
+	__htree_erase_all_lock(hts, htree_first_rcu_locked(root), &erased);
+	ht_unlock(root);
 
 	pr_ht_info("(~~~~] done: sbit:%u, acnt:%d, dcnt:%llu, erased:%llu\n\n",
 		   hts->sbit, hts->acnt, hts->dcnt, erased);
@@ -456,7 +463,7 @@ static u64 htree_erase_all(struct htree_state *hts, struct hash_tree *htree)
 /**
  * _htree_insert_range - insert udata to hash tree using ht_insert()
  * @hts: htree_state pointer
- * @htree: hash_tree root pointer
+ * @root: hash_tree root pointer
  * @start: start index to insert
  * @end: end index to insert
  * @gap: gap between indices
@@ -466,7 +473,7 @@ static u64 htree_erase_all(struct htree_state *hts, struct hash_tree *htree)
  * if req is htf_ins, the new udata is inserted next to each other.
  * if req is htf_erase, the new udata is inserted, and old udata is erased.
  */
-static u64 _htree_insert_range(struct htree_state *hts, struct hash_tree *htree,
+static u64 _htree_insert_range(struct htree_state *hts, struct htree_root *root,
 			       u64 start, u64 end, u64 gap, enum ht_flags req)
 {
 	u64 index;
@@ -478,7 +485,7 @@ static u64 _htree_insert_range(struct htree_state *hts, struct hash_tree *htree,
 		   start, end, gap);
 	for (index = start; index <= end; index += gap) {
 		udata = _htree_data_alloc(index);
-		rdata = ht_insert(hts, htree, &udata->hdata, req);
+		rdata = ht_insert_lock(hts, root, &udata->hdata, req);
 		if (req == htf_erase && rdata) {
 			udata = hlist_entry_safe(rdata, struct data_struct, hdata);
 			if (udata && rdata->index == index) {
@@ -500,12 +507,12 @@ static u64 _htree_insert_range(struct htree_state *hts, struct hash_tree *htree,
 /**
  * _htree_find_range - find udata in the hash tree using ht_find()
  * @hts: htree_state pointer
- * @htree: hash_tree root pointer
+ * @root: hash_tree root pointer
  * @start: start index to find
  * @end: end index to find
  * @gap: gap between indices
  */
-static u64 _htree_find_range(struct htree_state *hts, struct hash_tree *htree,
+static u64 _htree_find_range(struct htree_state *hts, struct htree_root *root,
 			     u64 start, u64 end, u64 gap)
 {
 	u64 index;
@@ -516,7 +523,7 @@ static u64 _htree_find_range(struct htree_state *hts, struct hash_tree *htree,
 	pr_ht_info("[****) finding: [s:%llu ... e:%llu] (g:%llu)\n",
 		   start, end, gap);
 	for (index = start; index <= end; index += gap) {
-		rdata = ht_find(hts, htree, index);
+		rdata = ht_find(hts, htree_first_rcu(root), index);
 		if (rdata) {
 			udata = hlist_entry_safe(rdata, struct data_struct, hdata);
 			if (udata && rdata->index == index) {
@@ -525,6 +532,7 @@ static u64 _htree_find_range(struct htree_state *hts, struct hash_tree *htree,
 				found++;
 			}
 		}
+
 		loop++;
 		if (!(loop % HTREE_TEST_SCHED_CNT))
 			schedule();
@@ -537,23 +545,25 @@ static u64 _htree_find_range(struct htree_state *hts, struct hash_tree *htree,
 /**
  * _htree_erase_range - erase udata from hash tree using ht_erase()
  * @hts: htree_state pointer
- * @htree: hash_tree root pointer
+ * @root: hash_tree root pointer
  * @start: start index to erase
  * @end: end index to erase
  * @gap: gap between indices
  */
-static u64 _htree_erase_range(struct htree_state *hts, struct hash_tree *htree,
+static u64 _htree_erase_range(struct htree_state *hts, struct htree_root *root,
 			      u64 start, u64 end, u64 gap)
 {
 	u64 index;
 	u64 loop = 0, erased = 0;
+	struct hash_tree *htree;
 	struct data_struct *udata;
 	struct htree_data *rdata;
 
 	pr_ht_info("[----) erasing: [s:%llu ... e:%llu] (g:%llu)\n",
 		   start, end, gap);
 	for (index = start; index <= end; index += gap) {
-		rdata = ht_erase(hts, htree, index);
+		htree = htree_first_rcu(root);
+		rdata = ht_erase_lock(hts, root, index);
 		if (rdata) {
 			udata = hlist_entry_safe(rdata, struct data_struct, hdata);
 			if (udata && rdata->index == index) {
@@ -580,22 +590,24 @@ static u64 _htree_erase_range(struct htree_state *hts, struct hash_tree *htree,
 /**
  * _htree_update_range - update udata in the hash tree using ft_find()
  * @hts: htree_state pointer
- * @htree: hash_tree root pointer
+ * @root: hash_tree root pointer
  * @start: start index to update
  * @end: end index to update
  * @gap: gap between indices
  */
-static u64 _htree_update_range(struct htree_state *hts, struct hash_tree *htree,
+static u64 _htree_update_range(struct htree_state *hts, struct htree_root *root,
 			u64 start, u64 end, u64 gap)
 {
 	u64 index;
 	u64 loop = 0, updated = 0;
+	struct hash_tree *htree;
 	struct data_struct *udata;
 	struct htree_data *rdata;
 
 	pr_ht_info("[####) updating: [s:%llu ... e:%llu] (g:%llu)\n",
 		   start, end, gap);
 	for (index = start; index <= end; index += gap) {
+		htree = htree_first_rcu(root);
 		rdata = ht_find(hts, htree, index);
 		if (rdata) {
 			udata = hlist_entry_safe(rdata, struct data_struct, hdata);
@@ -630,14 +642,14 @@ static u64 _htree_update_range(struct htree_state *hts, struct hash_tree *htree,
 /**
  * _htree_statis - calculate hash tree statistics and get into hts.
  * @hts: htree_state pointer to store statistics
- * @htree: hash_tree root pointer
+ * @root: hash_tree root pointer
  */
-static void _htree_statis(struct htree_state *hts, struct hash_tree *htree)
+static void _htree_statis(struct htree_state *hts, struct htree_root *root)
 {
 	s32 acnt = 0;
 	u64 dcnt = 0;
 
-	ht_statis(hts, htree, &acnt, &dcnt);
+	ht_statis(hts, htree_first_rcu(root), &acnt, &dcnt);
 
 	if (hts->dcnt == dcnt && hts->acnt == acnt) {
 		pr_ht_info("[ OK ] statist: acnt:%d, dcnt:%llu ", acnt, dcnt);
@@ -651,8 +663,10 @@ static void _htree_statis(struct htree_state *hts, struct hash_tree *htree)
 
 /**
  * _htree_statis_info - shows information calculated by htree_statis().
+ * @hts: htree_state pointer to read statistics
+ * @root: hash_tree root pointer
  */
-static void _htree_statis_info(struct htree_state *hts, struct hash_tree *htree)
+static void _htree_statis_info(struct htree_state *hts, struct htree_root *root)
 {
 	u32 sizh = sizeof(struct hash_tree);
 	u32 sizd = sizeof(struct data_struct);
@@ -663,7 +677,7 @@ static void _htree_statis_info(struct htree_state *hts, struct hash_tree *htree)
 	u64 smem = hsum + dsum;
 
 	if (hts->asum == 0)
-		_htree_statis(hts, htree);
+		_htree_statis(hts, root);
 
 	pr_ht_stat("------------------------------------------\n");
 	pr_ht_stat(" hash start bits(sbit) :       %10d\n", hts->sbit);
@@ -692,10 +706,11 @@ static void _htree_statis_info(struct htree_state *hts, struct hash_tree *htree)
  * if sort flag is HTREE_FLAG_ASCD, root hash table has the smallest index.
  * if sort flag is HTREE_FLAG_DECD, root hash table has the largest index.
  */
-static void _htree_get_most_index(struct htree_state *hts, struct hash_tree *htree)
+static void _htree_get_most_index(struct htree_state *hts, struct htree_root *root)
 {
 	struct htree_data *hdata;
-	hdata = ht_most_index(hts, htree);
+
+	hdata = ht_most_index(hts, htree_first_rcu(root));
 	if (hdata) {
 		if (hts->sort == HTREE_FLAG_ASCD) {
 			pr_ht_stat("[MOST] smallest index:%llu\n\n", hdata->index);
@@ -708,20 +723,20 @@ static void _htree_get_most_index(struct htree_state *hts, struct hash_tree *htr
 /**
  * _htree_remove_all - remove all udata and hash trees
  *
- * before run ht_destroy(), the udata must be erased all.
- * ht_destroy() removes all hash trees, but it does not remove the udata.
+ * before run ht_destroy_lock(), the udata must be erased all.
+ * ht_destroy_lock() removes all hash trees, but it does not remove the udata.
  */
-static void _htree_remove_all(struct htree_state *hts, struct hash_tree *htree)
+static void _htree_remove_all(struct htree_state *hts, struct htree_root *root)
 {
 	/* remove all udata */
-	hts->dcnt -= htree_erase_all(hts, htree);
+	hts->dcnt -= htree_erase_all_lock(hts, root);
 	if (hts->dcnt != 0) {
 		pr_ht_warn("[WARN] erase remained acnt:%d, dcnt:%llu\n\n",
 			   hts->acnt, hts->dcnt);
 	}
 
 	/* remove all hash trees */
-	if (ht_destroy(hts, htree) == htf_ok) {
+	if (ht_destroy_lock(hts, root) == htf_ok) {
 		pr_ht_stat("[ OK ] destroy remained acnt:%d, dcnt:%llu\n\n",
 			   hts->acnt, hts->dcnt);
 	} else {
@@ -743,7 +758,6 @@ static void _htree_remove_all(struct htree_state *hts, struct hash_tree *htree)
  */
 static u64 _htree_test_index_loop(struct htree_state *hts, u64 start, u64 end)
 {
-	struct hash_tree *htree;
 	u64 inserted, found, erased, updated;
 	u64 dcnt, slice;
 
@@ -752,42 +766,42 @@ static u64 _htree_test_index_loop(struct htree_state *hts, u64 start, u64 end)
 	slice = (end - start) / 10 + 2;
 
 	/* first root hash tree alloc */
-	htree = ht_table_alloc(hts);
+	htree_root_alloc(hts, &ht_root);
 
-	inserted = _htree_insert_range(hts, htree, start, end, 1, htf_ins);
+	inserted = _htree_insert_range(hts, &ht_root, start, end, 1, htf_ins);
 	if (inserted != hts->dcnt) {
 		pr_ht_err("[FAIL] inserted:%llu, dcnt:%llu, diff:%lld\n\n",
 			  inserted, hts->dcnt, inserted - hts->dcnt);
 	}
 
-	_htree_statis(hts, htree);
+	_htree_statis(hts, &ht_root);
 
-	erased = _htree_erase_range(hts, htree, start, end, slice);
-	found = _htree_find_range(hts, htree, start, end, slice);
+	erased = _htree_erase_range(hts, &ht_root, start, end, slice);
+	found = _htree_find_range(hts, &ht_root, start, end, slice);
 	if (found) {
 		pr_ht_err("[FAIL] erased:%llu, found:%llu, diff:%lld\n\n",
 			  erased, found, erased - found);
 	}
 
-	_htree_statis(hts, htree);
+	_htree_statis(hts, &ht_root);
 
-	inserted = _htree_insert_range(hts, htree, start, end, slice, htf_ins);
-	updated = _htree_update_range(hts, htree, start, end, slice);
+	inserted = _htree_insert_range(hts, &ht_root, start, end, slice, htf_ins);
+	updated = _htree_update_range(hts, &ht_root, start, end, slice);
 	if (inserted != updated) {
 		pr_ht_err("[FAIL] inserted:%llu, updated:%llu, diff:%lld\n\n",
 			  inserted, updated, inserted - updated);
 	}
 
-	_htree_statis(hts, htree);
-	_htree_get_most_index(hts, htree);
+	_htree_statis(hts, &ht_root);
+	_htree_get_most_index(hts, &ht_root);
 
 #ifdef HTREE_DEBUG_DETAIL
-	htree_debug_walks_all(hts, htree, 0);
+	htree_debug_walks_all(hts, &ht_root, 0);
 #endif
-	_htree_statis_info(hts, htree);
+	_htree_statis_info(hts, &ht_root);
 	dcnt = hts->dcnt;
 
-	_htree_remove_all(hts, htree);
+	_htree_remove_all(hts, &ht_root);
 
 	return dcnt;
 }
@@ -872,7 +886,6 @@ index type:<%s>, sorting type:<%s>\n", idxts[idx_type], sorts[sort_type]);
 static void _htree_test_idx_random(u8 idx_type, u8 sort_type, u64 maxnr)
 {
 	u64 i, index;
-	struct hash_tree *htree;
 	struct data_struct *udata;
 	struct htree_data *rdata;
 	u64 loop = 0, inserted = 0, erased = 0;
@@ -886,13 +899,13 @@ static void _htree_test_idx_random(u8 idx_type, u8 sort_type, u64 maxnr)
 	ht_hts_clear_init(hts, maxnr, idx_type, sort_type);
 
 	/* first root hash tree alloc */
-	htree = ht_table_alloc(hts);
+	htree_root_alloc(hts, &ht_root);
 
 	pr_ht_stat("[START) RANDOM: sbit:%u, index type:<%s>, sorting type:<%s>\n\n",
 		   hts->sbit, idxts[idx_type], sorts[sort_type]);
 
 	udata = _htree_data_alloc(check_idx);
-	rdata = ht_insert(hts, htree, &udata->hdata, htf_ins);
+	rdata = ht_insert_lock(hts, &ht_root, &udata->hdata, htf_ins);
 	inserted++;
 	loop++;
 
@@ -902,7 +915,7 @@ static void _htree_test_idx_random(u8 idx_type, u8 sort_type, u64 maxnr)
 			get_random_u32() : get_random_u64();
 
 		udata = _htree_data_alloc(index);
-		rdata = ht_insert(hts, htree, &udata->hdata, htf_ins);
+		rdata = ht_insert_lock(hts, &ht_root, &udata->hdata, htf_ins);
 		if (!rdata)
 			inserted++;
 		loop++;
@@ -910,9 +923,9 @@ static void _htree_test_idx_random(u8 idx_type, u8 sort_type, u64 maxnr)
 			schedule();
 	}
 
-	_htree_statis(hts, htree);
+	_htree_statis(hts, &ht_root);
 
-	rdata = ht_find(hts, htree, check_idx);
+	rdata = ht_find(hts, htree_first_rcu(&ht_root), check_idx);
 	if (!rdata) {
 		pr_ht_err("[FAIL] NOT found check index:%llu\n\n", check_idx);
 	}
@@ -923,7 +936,7 @@ static void _htree_test_idx_random(u8 idx_type, u8 sort_type, u64 maxnr)
 		index = (idx_type == HTREE_FLAG_IDX32) ? 
 			get_random_u32() : get_random_u64();
 
-		rdata = ht_erase(hts, htree, index);
+		rdata = ht_erase_lock(hts, &ht_root, index);
 		if (rdata) {
 			udata = hlist_entry_safe(rdata, struct data_struct, hdata);
 			if (udata && rdata->index == index) {
@@ -938,9 +951,9 @@ static void _htree_test_idx_random(u8 idx_type, u8 sort_type, u64 maxnr)
 			schedule();
 	}
 
-	_htree_statis(hts, htree);
+	_htree_statis(hts, &ht_root);
 
-	rdata = ht_find(hts, htree, check_idx);
+	rdata = ht_find(hts, htree_first_rcu(&ht_root), check_idx);
 	if (!rdata) {
 		pr_ht_info("[INFO] check index:%llu (erased)\n\n", check_idx);
 	}
@@ -949,13 +962,13 @@ static void _htree_test_idx_random(u8 idx_type, u8 sort_type, u64 maxnr)
 		   loop, inserted, erased);
 
 #ifdef HTREE_DEBUG_DETAIL
-	htree_debug_walks_all(hts, htree, 0);
+	htree_debug_walks_all(hts, &ht_root, 0);
 #endif
 
-	_htree_get_most_index(hts, htree);
-	_htree_statis_info(hts, htree);
+	_htree_get_most_index(hts, &ht_root);
+	_htree_statis_info(hts, &ht_root);
 
-	_htree_remove_all(hts, htree);
+	_htree_remove_all(hts, &ht_root);
 
 	kfree(hts);
 }
@@ -975,7 +988,6 @@ static void _htree_test_idx_random(u8 idx_type, u8 sort_type, u64 maxnr)
  */
 static void _htree_test_index_same(u8 idx_type, u8 sort_type, u64 maxnr)
 {
-	struct hash_tree *htree;
 	u64 inserted, found;
 	const char *idxts[] = {	"64bits", "32bits" };
 	const char *sorts[] = {	"ASCD", "DECD" };
@@ -987,49 +999,49 @@ static void _htree_test_index_same(u8 idx_type, u8 sort_type, u64 maxnr)
 	ht_hts_clear_init(hts, maxnr, idx_type, sort_type);
 
 	/* first root hash tree alloc */
-	htree = ht_table_alloc(hts);
+	htree_root_alloc(hts, &ht_root);
 
 	pr_ht_stat("[START) SAME: sbit:%u, index type:<%s>, sorting type:<%s>\n\n",
 		   hts->sbit, idxts[idx_type], sorts[sort_type]);
 
 	pr_ht_stat("[loop) %llu: new index inserting(htf_ins)\n\n", maxnr);
-	inserted = _htree_insert_range(hts, htree, 0, maxnr, gap - 1, htf_ins);
+	inserted = _htree_insert_range(hts, &ht_root, 0, maxnr, gap - 1, htf_ins);
 	if (inserted != hts->dcnt) {
 		pr_ht_err("[FAIL] inserted:%llu, dcnt:%llu, diff:%lld\n\n",
 			  inserted, hts->dcnt, inserted - hts->dcnt);
 	}
 
-	_htree_statis(hts, htree);
+	_htree_statis(hts, &ht_root);
 
 	pr_ht_stat("[loop) %llu: SAME index inserting(htf_erase)\n\n", maxnr);
-	inserted = _htree_insert_range(hts, htree, 1, maxnr, gap, htf_erase);
+	inserted = _htree_insert_range(hts, &ht_root, 1, maxnr, gap, htf_erase);
 	if (inserted != 0) {
 		pr_ht_err("[FAIL] inserted:%llu, dcnt:%llu, diff:%lld\n\n",
 			  inserted, hts->dcnt, inserted - hts->dcnt);
 	}
 
 	pr_ht_stat("[loop) %llu: SAME index inserting(htf_ins)\n\n", maxnr);
-	inserted = _htree_insert_range(hts, htree, 1, maxnr, gap, htf_ins);
+	inserted = _htree_insert_range(hts, &ht_root, 1, maxnr, gap, htf_ins);
 	if (inserted != (maxnr / gap)) {
 		pr_ht_err("[FAIL] inserted:%llu, dcnt:%llu, diff:%lld\n\n",
 			  inserted, hts->dcnt, inserted - hts->dcnt);
 	}
 
-	found = _htree_find_range(hts, htree, 0, maxnr, gap - 1);
+	found = _htree_find_range(hts, &ht_root, 0, maxnr, gap - 1);
 	if (found != (hts->dcnt - inserted)) {
 		pr_ht_err("[FAIL] dcnt:%llu, inserted:%llu, found:%llu\n\n",
 			  hts->dcnt, inserted, found);
 	}
 
-	_htree_statis(hts, htree);
+	_htree_statis(hts, &ht_root);
 
 #ifdef HTREE_DEBUG_DETAIL
-	htree_debug_walks_all(hts, htree, 0);
+	htree_debug_walks_all(hts, &ht_root, 0);
 #endif
-	_htree_get_most_index(hts, htree);
-	_htree_statis_info(hts, htree);
+	_htree_get_most_index(hts, &ht_root);
+	_htree_statis_info(hts, &ht_root);
 
-	_htree_remove_all(hts, htree);
+	_htree_remove_all(hts, &ht_root);
 
 	kfree(hts);
 }
