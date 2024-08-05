@@ -85,24 +85,51 @@ Hash Tree Summary (include/linux/htree.h)
 Hash Tree API flow (lib/htree.c, lib/htree-test.c)
 -----------------------------------------------------------------------------
 
-*hts = ht_hts_alloc()           /* alloc hts */
-ht_hts_clear_init(hts, ...)	/* max nr, type(32/64bits), sort(ASC, DES) */
-*htree = ht_table_alloc(hts)    /* alloc first(depth:0) htree */
+DEFINE_HTREE_ROOT(ht_root);     /* define htree_root */
+
+*hts = ht_hts_alloc();          /* alloc hts */
+
+ht_hts_clear_init(hts, ...);    /* max nr, type(32/64bits), sort(ASC, DES) */
+
+htree_root_alloc(hts, &ht_root);/* alloc first(root) hash tree */
 
 run_loop() {
-	*udata = _data_alloc(index)             /* alloc udata */
-	ht_insert(hts, htree, udata->hdata, ..)	/* working data with index */
-	ht_erase(hts, htree, index)
-	hdata = ht_find(hts, htree, index)
-	hdata = ht_most_index(hts, htree)	/* smallest, largest index */
-	ht_statis(hts, htree, ...)		/* statistic */
+        *udata = _data_alloc(index);    /* alloc udata */
+
+        /* working data with index */
+        ht_insert_lock(hts, &ht_root, udata->hdata, ..);
+        ht_erase_lock(hts, &ht_root, index);
+        hdata = ht_find(hts, ht_root.ht_first, index);
+
+        /* smallest, largest index */
+        hdata = ht_most_index(hts, ht_root.ht_first);
+
+        /* statistic */
+        ht_statis(hts, ht_root.ht_first, ...);
 }
 
-htree_erase_all(hts, htree)     /* remove all udata */
-ht_destroy(hts, htree)          /* remove all htree */
-kfree(hts)                      /* remove hts */
+htree_erase_all_lock(hts, &ht_root);    /* remove all udata */
+ht_destroy_lock(hts, &ht_root);         /* remove all htree */
+kfree(hts)                              /* remove hts */
 
 -----------------------------------------------------------------------------
-Please refer to the attached PDF for more detailed information.
+Build (Compile)
 -----------------------------------------------------------------------------
+lib/Kconfig.debug
 
++config HTREE_TEST
++       tristate "Hash Tree test"
++       depends on DEBUG_KERNEL
++       help
++         A performance testing of the hash tree library.
++
+
+lib/Makefile
+
++	lib-y += htree.o
++	obj-$(CONFIG_HTREE_TEST) += htree-test.o
+
+-----------------------------------------------------------------------------
+Please refer to the attached PDF for more detailed information:
+https://github.com/kernel-bz/htree/blob/main/docs/htree-20240802.pdf
+-----------------------------------------------------------------------------
