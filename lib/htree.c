@@ -114,7 +114,7 @@ static enum ht_flags __ht_find(struct htree_state *hts, struct hash_tree *htree,
 _retry:
 	*rtree = htree;
 	ncnt = ht_ncnt_get(htree[hts->hkey].next);
-	if (ncnt == 0)
+	if (unlikely(ncnt == 0))
 		goto _next_step;
 
 	hlist_for_each_entry(pos, &htree[hts->hkey].head, hnode) {
@@ -180,7 +180,7 @@ struct htree_data *ht_find(struct htree_state *hts,
 	struct htree_data *rdata = NULL;
 	struct hash_tree *rtree;
 
-	if (!htree)
+	if (unlikely(!htree))
 		return NULL;
 
 	if (_ht_find(hts, htree, index, &rdata, &rtree) == htf_find)
@@ -232,7 +232,7 @@ _retry:
 	}
 
 	ncnt = ht_ncnt_get(ntree[hkey].next);
-	if (ncnt == 0) {
+	if (unlikely(ncnt == 0)) {
 		htree_add_head(ntree, &edata->hnode, hkey);
 		goto _next;
 	}
@@ -292,7 +292,7 @@ static void _ht_insert(struct htree_state *hts, struct hash_tree *htree,
 	hts->hkey = ht_get_hkey(index, hts->dept, bits, hts->idxt);
 	ncnt = ht_ncnt_get(htree[hts->hkey].next);
 
-	if (ncnt == 0) {
+	if (unlikely(ncnt == 0)) {
 		htree_add_head(htree, &hdata->hnode, hts->hkey);
 		goto _finish;
 	}
@@ -348,7 +348,7 @@ struct htree_data *ht_insert(struct htree_state *hts, struct hash_tree *htree,
 	struct hash_tree *rtree = NULL;
 	enum ht_flags htf;
 
-	if (!htree)
+	if (unlikely(!htree))
 		return NULL;
 
 	htf = _ht_find(hts, htree, hdata->index, &rdata, &rtree);
@@ -379,7 +379,7 @@ static enum ht_flags ___ht_erase(struct htree_state *hts,
 		if (htree[k].next)
 			break;
 
-	if (k == anum) {
+	if (unlikely(k == anum)) {
 		kfree(htree);
 		hts->acnt--;
 		hts->dept--;
@@ -408,7 +408,7 @@ static int __ht_erase(struct htree_state *hts, struct hash_tree *htree,
 	ncnt = ht_ncnt_get(htree[key].next);
 	bits = ht_bits_from_depth(hts->sbit, hts->dept);
 
-	if (ncnt == 0)
+	if (unlikely(ncnt == 0))
 		goto _next_step;
 
 	hlist_for_each_entry_safe(pos, tmp, &htree[key].head, hnode) {
@@ -429,7 +429,7 @@ static int __ht_erase(struct htree_state *hts, struct hash_tree *htree,
 		}
 	}
 
-	if (ncnt == 0)
+	if (unlikely(ncnt == 0))
 		ret = ___ht_erase(hts, htree, bits);
 
 	if (ret > htf_none)	/* erased or freed */
@@ -444,7 +444,7 @@ _next_step:
 		/* must be recursive call */
 		ret = __ht_erase(hts, _next, rdata, index);
 
-		if (ret == htf_freed) {
+		if (unlikely(ret == htf_freed)) {
 			WRITE_ONCE(htree[key].next, ht_ncnt_set(NULL, ncnt));
 			ret = htf_erase;
 		}
@@ -484,7 +484,7 @@ struct htree_data *ht_erase(struct htree_state *hts,
 {
 	struct htree_data *rdata = NULL;
 
-	if (!htree)
+	if (unlikely(!htree))
 		return NULL;
 
 	if (_ht_erase(hts, htree, &rdata, index) == htf_erase)
@@ -558,7 +558,7 @@ enum ht_flags ht_destroy_lock(struct htree_state *hts, struct htree_root *root)
 		return htf_ok;
 
 	htree = htree_first_rcu(root);
-	if (!htree)
+	if (unlikely(!htree))
 		return htf_none;
 
 	hts->dept = 0;
@@ -598,7 +598,7 @@ static void __ht_statis(struct htree_state *hts,
 
 	for (k = 0; k < anum; k++) {
 		ncnt = ht_ncnt_get(htree[k].next);
-		if (ncnt > 0) {
+		if (likely(ncnt > 0)) {
 			(*dcnt) += ncnt;
 		}
 		_next = ht_ncnt_pointer(htree[k].next);
@@ -631,7 +631,7 @@ void ht_statis(struct htree_state *hts,
 	hts->dept = 0;
 	hts->dmax = 0;
 
-	if (!htree)
+	if (unlikely(!htree))
 		return;
 
 	__ht_statis(hts, htree, acnt, dcnt);

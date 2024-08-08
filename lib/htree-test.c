@@ -10,6 +10,7 @@
 #include <linux/moduleparam.h>
 #include <linux/random.h>
 #include <linux/sched.h>
+#include <asm/timex.h>
 
 #include <linux/htree.h>
 
@@ -44,8 +45,8 @@
 */
 
 
-/*
 #define HTREE_DEBUG_INFO
+/*
 #define HTREE_DEBUG_DETAIL
 */
 
@@ -277,7 +278,7 @@ static void htree_debug_hdata(struct htree_state *hts, struct hash_tree *hcurr,
 		"htf_freed",
 	};
 
-	if (!hcurr)
+	if (unlikely(!hcurr))
 		return;
 
 	dept = hts->dept;
@@ -331,7 +332,7 @@ static void __htree_debug_walks_all(struct htree_state *hts,
 
 	for (k = 0; k < anum; k++) {
 		ncnt = ht_ncnt_get(htree[k].next);
-		if (ncnt > 0) {
+		if (likely(ncnt > 0)) {
 			bits = ht_bits_from_depth(hts->sbit, hts->dept);
 			pr_ht_debug("d:%u b:%u [%u] %p (%u): ",
 				    hts->dept, bits, k, &htree[k], ncnt);
@@ -407,14 +408,14 @@ static void __htree_erase_all_lock(struct htree_state *hts,
 
 	for (k = 0; k < anum; k++) {
 		ncnt = ht_ncnt_get(htree[k].next);
-		if (ncnt > 0) {
+		if (likely(ncnt > 0)) {
 			bits = ht_bits_from_depth(hts->sbit, hts->dept);
 			hlist_for_each_entry_safe(pos, tmp,
 						  &htree[k].head, hnode) {
 				hlist_del(&pos->hnode);
 				udata = hlist_entry_safe(pos, 
 						struct data_struct, hdata);
-				if (udata) {
+				if (likely(udata)) {
 					kfree(udata);
 					(*erased)++;
 				}
@@ -478,17 +479,20 @@ static u64 _htree_insert_range(struct htree_state *hts, struct htree_root *root,
 {
 	u64 index;
 	u64 loop = 0, ins = 0, era = 0;
+	cycles_t time1, time2;
+	u64 latency;
 	struct data_struct *udata;
 	struct htree_data *rdata;
 
 	pr_ht_info("[++++) inserting: [s:%llu ... e:%llu] (g:%llu)\n",
 		   start, end, gap);
+	time1 = get_cycles();
 	for (index = start; index <= end; index += gap) {
 		udata = _htree_data_alloc(index);
 		rdata = ht_insert_lock(hts, root, &udata->hdata, req);
 		if (req == htf_erase && rdata) {
 			udata = hlist_entry_safe(rdata, struct data_struct, hdata);
-			if (udata && rdata->index == index) {
+			if (likely((udata && rdata->index == index))) {
 				kfree(udata);
 				era++;
 			}
@@ -498,8 +502,10 @@ static u64 _htree_insert_range(struct htree_state *hts, struct htree_root *root,
 		if (!(loop % HTREE_TEST_SCHED_CNT))
 			schedule();
 	}
-	pr_ht_info("(++++] done: loop:%llu, inserted:%llu, same erased:%llu\n\n",
-		   loop, ins, era);
+	time2 = get_cycles();
+	latency = div_u64(time2 - time1, loop);
+	pr_ht_info("(++++] done: loop:%llu, inserted:%llu, same erased:%llu, \
+latency:%llu cycles\n\n", loop, ins, era, latency);
 
 	return ins - era;
 }
@@ -517,16 +523,19 @@ static u64 _htree_find_range(struct htree_state *hts, struct htree_root *root,
 {
 	u64 index;
 	u64 loop = 0, found = 0;
+	cycles_t time1, time2;
+	u64 latency;
 	struct data_struct *udata;
 	struct htree_data *rdata;
 
 	pr_ht_info("[****) finding: [s:%llu ... e:%llu] (g:%llu)\n",
 		   start, end, gap);
+	time1 = get_cycles();
 	for (index = start; index <= end; index += gap) {
 		rdata = ht_find(hts, htree_first_rcu(root), index);
 		if (rdata) {
 			udata = hlist_entry_safe(rdata, struct data_struct, hdata);
-			if (udata && rdata->index == index) {
+			if (likely(udata && rdata->index == index)) {
 				pr_ht_find("*todo: find:<%llu> %c %c %c\n",
 				index, udata->a, (char)udata->b, (char)udata->c);
 				found++;
@@ -537,8 +546,10 @@ static u64 _htree_find_range(struct htree_state *hts, struct htree_root *root,
 		if (!(loop % HTREE_TEST_SCHED_CNT))
 			schedule();
 	}
-	pr_ht_info("(****] done: loop:%llu, found:%llu, diff:%llu\n\n",
-		   loop, found, loop - found);
+	time2 = get_cycles();
+	latency = div_u64(time2 - time1, loop);
+	pr_ht_info("(****] done: loop:%llu, found:%llu, diff:%llu, \
+latency:%llu cycles\n\n", loop, found, loop - found, latency);
 	return found;
 }
 
@@ -555,18 +566,21 @@ static u64 _htree_erase_range(struct htree_state *hts, struct htree_root *root,
 {
 	u64 index;
 	u64 loop = 0, erased = 0;
+	cycles_t time1, time2;
+	u64 latency;
 	struct hash_tree *htree;
 	struct data_struct *udata;
 	struct htree_data *rdata;
 
 	pr_ht_info("[----) erasing: [s:%llu ... e:%llu] (g:%llu)\n",
 		   start, end, gap);
+	time1 = get_cycles();
 	for (index = start; index <= end; index += gap) {
 		htree = htree_first_rcu(root);
 		rdata = ht_erase_lock(hts, root, index);
 		if (rdata) {
 			udata = hlist_entry_safe(rdata, struct data_struct, hdata);
-			if (udata && rdata->index == index) {
+			if (likely(udata && rdata->index == index)) {
 				pr_ht_erase("*todo: erase:<%llu> %c %c %c\n",
 				index, udata->a, (char)udata->b, (char)udata->c);
 				kfree(udata);
@@ -582,8 +596,10 @@ static u64 _htree_erase_range(struct htree_state *hts, struct htree_root *root,
 		if (!(loop % HTREE_TEST_SCHED_CNT))
 			schedule();
 	}
-	pr_ht_info("(----] done: loop:%llu, erased:%llu, diff:%llu\n\n",
-		   loop, erased, loop - erased);
+	time2 = get_cycles();
+	latency = div_u64(time2 - time1, loop);
+	pr_ht_info("(----] done: loop:%llu, erased:%llu, diff:%llu, \
+latency:%llu cycles\n\n", loop, erased, loop - erased, latency);
 	return erased;
 }
 
@@ -600,18 +616,21 @@ static u64 _htree_update_range(struct htree_state *hts, struct htree_root *root,
 {
 	u64 index;
 	u64 loop = 0, updated = 0;
+	cycles_t time1, time2;
+	u64 latency;
 	struct hash_tree *htree;
 	struct data_struct *udata;
 	struct htree_data *rdata;
 
 	pr_ht_info("[####) updating: [s:%llu ... e:%llu] (g:%llu)\n",
 		   start, end, gap);
+	time1 = get_cycles();
 	for (index = start; index <= end; index += gap) {
 		htree = htree_first_rcu(root);
 		rdata = ht_find(hts, htree, index);
 		if (rdata) {
 			udata = hlist_entry_safe(rdata, struct data_struct, hdata);
-			if (udata && rdata->index == index) {
+			if (likely(udata && rdata->index == index)) {
 				pr_ht_update("*todo: update:<%llu> %c %c %c ",
 				index, udata->a, (char)udata->b, (char)udata->c);
 				/* todo: update user defined data */
@@ -633,8 +652,11 @@ static u64 _htree_update_range(struct htree_state *hts, struct htree_root *root,
 		if (!(loop % HTREE_TEST_SCHED_CNT))
 			schedule();
 	}
-	pr_ht_info("(####] done: loop:%llu, updated:%llu, diff:%llu\n\n",
-		   loop, updated, loop - updated);
+	time2 = get_cycles();
+	latency = div_u64(time2 - time1, loop);
+	pr_ht_info("(####] done: loop:%llu, updated:%llu, diff:%llu, \
+latency: %llu cycles\n\n",
+		   loop, updated, loop - updated, latency);
 
 	return updated;
 }
@@ -651,7 +673,7 @@ static void _htree_statis(struct htree_state *hts, struct htree_root *root)
 
 	ht_statis(hts, htree_first_rcu(root), &acnt, &dcnt);
 
-	if (hts->dcnt == dcnt && hts->acnt == acnt) {
+	if (likely(hts->dcnt == dcnt && hts->acnt == acnt)) {
 		pr_ht_info("[ OK ] statist: acnt:%d, dcnt:%llu ", acnt, dcnt);
 	} else {
 		pr_ht_info("[FAIL] statist: acnt:%d(%d), dcnt:%llu(%llu)\n",
@@ -676,7 +698,7 @@ static void _htree_statis_info(struct htree_state *hts, struct htree_root *root)
 	u64 dsum = (sizd * hts->dcnt) >> 10;
 	u64 smem = hsum + dsum;
 
-	if (hts->asum == 0)
+	if (unlikely(hts->asum == 0))
 		_htree_statis(hts, root);
 
 	pr_ht_stat("------------------------------------------\n");
@@ -711,7 +733,7 @@ static void _htree_get_most_index(struct htree_state *hts, struct htree_root *ro
 	struct htree_data *hdata;
 
 	hdata = ht_most_index(hts, htree_first_rcu(root));
-	if (hdata) {
+	if (likely(hdata)) {
 		if (hts->sort == HTREE_FLAG_ASCD) {
 			pr_ht_stat("[MOST] smallest index:%llu\n\n", hdata->index);
 		} else {
@@ -730,13 +752,13 @@ static void _htree_remove_all(struct htree_state *hts, struct htree_root *root)
 {
 	/* remove all udata */
 	hts->dcnt -= htree_erase_all_lock(hts, root);
-	if (hts->dcnt != 0) {
+	if (unlikely(hts->dcnt != 0)) {
 		pr_ht_warn("[WARN] erase remained acnt:%d, dcnt:%llu\n\n",
 			   hts->acnt, hts->dcnt);
 	}
 
 	/* remove all hash trees */
-	if (ht_destroy_lock(hts, root) == htf_ok) {
+	if (likely(ht_destroy_lock(hts, root) == htf_ok)) {
 		pr_ht_stat("[ OK ] destroy remained acnt:%d, dcnt:%llu\n\n",
 			   hts->acnt, hts->dcnt);
 	} else {
@@ -761,7 +783,7 @@ static u64 _htree_test_index_loop(struct htree_state *hts, u64 start, u64 end)
 	u64 inserted, found, erased, updated;
 	u64 dcnt, slice;
 
-	if (start > end)
+	if (unlikely(start > end))
 		return 0;
 	slice = (end - start) / 10 + 2;
 
@@ -769,7 +791,7 @@ static u64 _htree_test_index_loop(struct htree_state *hts, u64 start, u64 end)
 	htree_root_alloc(hts, &ht_root);
 
 	inserted = _htree_insert_range(hts, &ht_root, start, end, 1, htf_ins);
-	if (inserted != hts->dcnt) {
+	if (unlikely(inserted != hts->dcnt)) {
 		pr_ht_err("[FAIL] inserted:%llu, dcnt:%llu, diff:%lld\n\n",
 			  inserted, hts->dcnt, inserted - hts->dcnt);
 	}
@@ -778,7 +800,7 @@ static u64 _htree_test_index_loop(struct htree_state *hts, u64 start, u64 end)
 
 	erased = _htree_erase_range(hts, &ht_root, start, end, slice);
 	found = _htree_find_range(hts, &ht_root, start, end, slice);
-	if (found) {
+	if (unlikely(found)) {
 		pr_ht_err("[FAIL] erased:%llu, found:%llu, diff:%lld\n\n",
 			  erased, found, erased - found);
 	}
@@ -787,7 +809,7 @@ static u64 _htree_test_index_loop(struct htree_state *hts, u64 start, u64 end)
 
 	inserted = _htree_insert_range(hts, &ht_root, start, end, slice, htf_ins);
 	updated = _htree_update_range(hts, &ht_root, start, end, slice);
-	if (inserted != updated) {
+	if (unlikely(inserted != updated)) {
 		pr_ht_err("[FAIL] inserted:%llu, updated:%llu, diff:%lld\n\n",
 			  inserted, updated, inserted - updated);
 	}
@@ -916,7 +938,7 @@ static void _htree_test_idx_random(u8 idx_type, u8 sort_type, u64 maxnr)
 
 		udata = _htree_data_alloc(index);
 		rdata = ht_insert_lock(hts, &ht_root, &udata->hdata, htf_ins);
-		if (!rdata)
+		if (likely(!rdata))
 			inserted++;
 		loop++;
 		if (!(loop % HTREE_TEST_SCHED_CNT))
@@ -926,7 +948,7 @@ static void _htree_test_idx_random(u8 idx_type, u8 sort_type, u64 maxnr)
 	_htree_statis(hts, &ht_root);
 
 	rdata = ht_find(hts, htree_first_rcu(&ht_root), check_idx);
-	if (!rdata) {
+	if (unlikely(!rdata)) {
 		pr_ht_err("[FAIL] NOT found check index:%llu\n\n", check_idx);
 	}
 
@@ -939,7 +961,7 @@ static void _htree_test_idx_random(u8 idx_type, u8 sort_type, u64 maxnr)
 		rdata = ht_erase_lock(hts, &ht_root, index);
 		if (rdata) {
 			udata = hlist_entry_safe(rdata, struct data_struct, hdata);
-			if (udata && rdata->index == index) {
+			if (likely(udata && rdata->index == index)) {
 				pr_ht_erase("*todo: erase:<%llu> %c %c %c\n",
 				index, udata->a, (char)udata->b, (char)udata->c);
 				kfree(udata);
@@ -954,7 +976,7 @@ static void _htree_test_idx_random(u8 idx_type, u8 sort_type, u64 maxnr)
 	_htree_statis(hts, &ht_root);
 
 	rdata = ht_find(hts, htree_first_rcu(&ht_root), check_idx);
-	if (!rdata) {
+	if (unlikely(!rdata)) {
 		pr_ht_info("[INFO] check index:%llu (erased)\n\n", check_idx);
 	}
 
@@ -1006,7 +1028,7 @@ static void _htree_test_index_same(u8 idx_type, u8 sort_type, u64 maxnr)
 
 	pr_ht_stat("[loop) %llu: new index inserting(htf_ins)\n\n", maxnr);
 	inserted = _htree_insert_range(hts, &ht_root, 0, maxnr, gap - 1, htf_ins);
-	if (inserted != hts->dcnt) {
+	if (unlikely(inserted != hts->dcnt)) {
 		pr_ht_err("[FAIL] inserted:%llu, dcnt:%llu, diff:%lld\n\n",
 			  inserted, hts->dcnt, inserted - hts->dcnt);
 	}
@@ -1015,20 +1037,20 @@ static void _htree_test_index_same(u8 idx_type, u8 sort_type, u64 maxnr)
 
 	pr_ht_stat("[loop) %llu: SAME index inserting(htf_erase)\n\n", maxnr);
 	inserted = _htree_insert_range(hts, &ht_root, 1, maxnr, gap, htf_erase);
-	if (inserted != 0) {
+	if (unlikely(inserted != 0)) {
 		pr_ht_err("[FAIL] inserted:%llu, dcnt:%llu, diff:%lld\n\n",
 			  inserted, hts->dcnt, inserted - hts->dcnt);
 	}
 
 	pr_ht_stat("[loop) %llu: SAME index inserting(htf_ins)\n\n", maxnr);
 	inserted = _htree_insert_range(hts, &ht_root, 1, maxnr, gap, htf_ins);
-	if (inserted != (maxnr / gap)) {
+	if (unlikely(inserted != (maxnr / gap))) {
 		pr_ht_err("[FAIL] inserted:%llu, dcnt:%llu, diff:%lld\n\n",
 			  inserted, hts->dcnt, inserted - hts->dcnt);
 	}
 
 	found = _htree_find_range(hts, &ht_root, 0, maxnr, gap - 1);
-	if (found != (hts->dcnt - inserted)) {
+	if (unlikely(found != (hts->dcnt - inserted))) {
 		pr_ht_err("[FAIL] dcnt:%llu, inserted:%llu, found:%llu\n\n",
 			  hts->dcnt, inserted, found);
 	}
